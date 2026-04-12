@@ -1,0 +1,34 @@
+{
+  "101": {
+    "id": 3,
+    "name": "polina",
+    "coordinates": {
+      "x": 123,
+      "y": 12.0
+    },
+    "creationDate": "2026-04-08T18:41:39.443874300+03:00[Europe/Moscow]",
+    "salary": -12000.0,
+    "position": "DIRECTOR",
+    "status": "REGULAR",
+    "person": {
+      "height": 170.0,
+      "weight": 3
+    }
+  },
+  "102": {
+    "id": 4,
+    "name": "katrina",
+    "coordinates": {
+      "x": 78,
+      "y": 90.0
+    },
+    "creationDate": "2026-04-08T18:46:51.371270700+03:00[Europe/Moscow]",
+    "salary": 50000.0,
+    "position": "COOK",
+    "status": "HIRED",
+    "person": {
+      "height": 180.0,
+      "weight": 45
+    }
+  }
+}

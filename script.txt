@@ -1,0 +1,15 @@
+# комментарий
+remove_key 104
+show
+insert 104
+Иван Петров
+100
+50.5
+50000
+COOK
+HIRED
+175.5
+70
+1990-05-15
+show
+sum_of_salary
