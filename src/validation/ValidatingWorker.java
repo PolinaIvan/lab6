@@ -20,6 +20,8 @@ public class ValidatingWorker implements WorkerLoader {
     private static final Logger logger = LoggerFactory.getLogger(ValidatingWorker.class);
 
     // поставщик данных (оборачиваемый объект)
+    // Supplier дает возможность инкапсулировать логику создания объекта и
+    // запустить её ровно в тот момент когда необходимо
     private final Supplier<TreeMap<Long, Worker>> loader;
 
     private int skippedCount = 0; // счётчик пропущенных работников
