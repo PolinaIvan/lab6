@@ -17,127 +17,147 @@ import server.HandlerCommand;
  * Может обрабатывать много клиентов одновременно.
  */
 public class Server {
-    // LoggerFactory.getLogger() — связывает логи с этим классом
     private static final Logger logger = LoggerFactory.getLogger(Server.class);
 
-    private static final int port = 8090;
+    private static volatile boolean running = true;
+
+    private static final int port = 8091;
     private static HandlerCommand commandHandler;
+    private static Selector selector;
+
 
     public static void main(String[] args) {
-        // Инициализируем обработчик команд (как раньше)
+        // Инициализируем обработчик команд
         String fileName = System.getenv("WORKERS");
         if (fileName == null) fileName = "workers.json";
         commandHandler = new HandlerCommand(fileName);
+
 
         try {
             // создаем серверный канал:
             ServerSocketChannel serverChannel = ServerSocketChannel.open();
             serverChannel.bind(new InetSocketAddress(port)); // привязываем канал к порту
-            serverChannel.configureBlocking(false);  // устанавливаем неблокирующий режим
+            serverChannel.configureBlocking(false); // устанавливаем неблокирующий режим
             // {} — плейсхолдер, port подставится вместо {}
             logger.info("Сервер запущен на порту {}", port);
 
-
             // создаем селектор:
-            Selector selector = Selector.open();
-
-            // регистрируем серверный канал на селекторе:
-            // OP_ACCEPT — ждём новые подключения
+            selector = Selector.open();
+            // регистрируем серверный канал на селекторе
             serverChannel.register(selector, SelectionKey.OP_ACCEPT);
             logger.info("Ожидание подключений...");
+
+            logger.info("Доступные команды сервера: save, exit");
 
             // хранилище данных клиентов:
             // каждому клиенту соответствует свой буфер для накопления данных
             Map<SocketChannel, ClientData> clientsData = new HashMap<>();
 
-            while (true) {
-                // ждем, когда кто-то подключится
-                selector.select();
+            // добавляем BufferedReader для неблокирующего чтения консоли
+            BufferedReader consoleReader = new BufferedReader(new InputStreamReader(System.in));
 
-                // возвращает набор событий, которые произошли
-                Set<SelectionKey> selectedKeys = selector.selectedKeys();
-                // удаляет событие после обработки
-                Iterator<SelectionKey> iterator = selectedKeys.iterator();
+            while (running) {
+                // таймаут 100 мс позволяет периодически проверять консольный ввод
+                int readyChannels = selector.select(100);
 
-                while (iterator.hasNext()) {
-                    SelectionKey key = iterator.next();
-                    iterator.remove();  // удаляем, чтобы не обрабатывать повторно
+                // вызов проверки консоли в главном цикле - каждые 100 мс или при сетевом событии
+                checkConsoleInput(consoleReader);
 
-                    try {
-                        if (key.isAcceptable()) {
-                            // новое подключение:
-                            ServerSocketChannel server = (ServerSocketChannel) key.channel(); // получаем канал
-                            SocketChannel clientChannel = server.accept(); // принимаем клиента
-                            clientChannel.configureBlocking(false);
+                // проверка readyChannels > 0, если селектор
+                // проснулся по таймауту - пропускаем обработку ключей
+                if (readyChannels > 0) {
+                    Set<SelectionKey> selectedKeys = selector.selectedKeys();
+                    Iterator<SelectionKey> iterator = selectedKeys.iterator();
 
+                    while (iterator.hasNext()) {
+                        SelectionKey key = iterator.next();
+                        iterator.remove();
 
-                            // регистрируем клиентский канал на чтение
-                            // чтобы селектор мог следить за данными от этого клиента
-                            clientChannel.register(selector, SelectionKey.OP_READ);
+                        try {
+                            if (key.isAcceptable()) {
+                                ServerSocketChannel server = (ServerSocketChannel) key.channel();
+                                SocketChannel clientChannel = server.accept();
+                                clientChannel.configureBlocking(false);
 
-                            // создаём буфер для этого клиента
-                            clientsData.put(clientChannel, new ClientData());
+                                clientChannel.register(selector, SelectionKey.OP_READ);
+                                clientsData.put(clientChannel, new ClientData());
 
-                            logger.info("Клиент подключился: {}", clientChannel.getRemoteAddress());
+                                logger.info("Клиент подключился: {}", clientChannel.getRemoteAddress());
 
-                        } else if (key.isReadable()) {
-                            // если есть данные для чтения:
-                            SocketChannel clientChannel = (SocketChannel) key.channel();
+                            } else if (key.isReadable()) {
+                                SocketChannel clientChannel = (SocketChannel) key.channel();
+                                ClientData clientData = clientsData.get(clientChannel);
+                                ByteBuffer buffer = clientData.getBuffer();
 
-                            // получаем буфер для этого клиента
-                            ClientData clientData = clientsData.get(clientChannel);
-                            ByteBuffer buffer = clientData.getBuffer();
+                                int bytesRead = clientChannel.read(buffer);
 
-                            // читаем данные из канала в буфер
-                            int bytesRead = clientChannel.read(buffer);
+                                if (bytesRead == -1) {
+                                    logger.info("Клиент отключился");
+                                    clientChannel.close();
+                                    clientsData.remove(clientChannel);
+                                    continue;
+                                }
 
-                            if (bytesRead == -1) {
-                                // клиент закрыл соединение
-                                logger.info("Клиент отключился");
-                                clientChannel.close();
-                                clientsData.remove(clientChannel);
-                                continue;
+                                buffer.flip();
+                                while (buffer.hasRemaining()) {
+                                    clientData.getReceivedData().add(buffer.get());
+                                }
+                                buffer.clear();
+
+                                CommandRequest request = tryDeserialize(clientData.getReceivedData());
+
+                                if (request != null) {
+                                    logger.info("Получена команда: {}", request.getCommandName());
+                                    CommandResponse response = commandHandler.executeCommand(request);
+                                    ByteBuffer responseBuffer = serializeResponse(response);
+                                    clientChannel.write(responseBuffer);
+                                    clientData.clear();
+                                }
                             }
-
-                            // переключаем буфер в режим чтения
-                            buffer.flip();
-
-                            // сохраняем все прочитанные байты
-                            while (buffer.hasRemaining()) {
-                                clientData.getReceivedData().add(buffer.get());
-                            }
-
-                            // переключаем буфер обратно в режим записи
-                            buffer.clear();
-
-                            // пробуем собрать объект из накопленных байтов
-                            // если достаточно данных, то возвращает объект
-                            CommandRequest request = tryDeserialize(clientData.getReceivedData());
-
-                            if (request != null) {
-                                logger.info("Получена команда: {}", request.getCommandName());
-
-                                // выполняем команду
-                                CommandResponse response = commandHandler.executeCommand(request);
-
-                                // превращаем объекты в байты и отправляем ответ клиенту
-                                ByteBuffer responseBuffer = serializeResponse(response);
-                                clientChannel.write(responseBuffer);
-
-                                // очищаем данные из буфера для следующей команды
-                                clientData.clear();
-                            }
+                        } catch (IOException e) {
+                            logger.error("Ошибка с клиентом: {}", e.getMessage(), e);
+                            key.channel().close();
+                            clientsData.remove(key.channel());
                         }
-                    } catch (IOException e) {
-                        logger.error("Ошибка с клиентом: {}", e.getMessage(), e);
-                        key.channel().close();
-                        clientsData.remove(key.channel());
                     }
                 }
             }
 
         } catch (IOException e) {
+            running = false;
             logger.error("Ошибка сервера: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Проверяет консольный ввод
+     *
+     * @param reader BufferedReader для чтения
+     */
+    private static void checkConsoleInput(BufferedReader reader) {
+        try {
+            // ready() возвращает true только если есть данные для чтения
+            // поток не будет ждать пока пользователь не введет строку
+            if (reader.ready()) {
+                String input = reader.readLine().trim().toLowerCase();
+
+                if (input.equals("save")) {
+                    // так как всё в одном потоке - не нужны блокировки
+                    commandHandler.saveCollection();
+                    System.out.println("Коллекция сохранена");
+                    logger.info("Команда save выполнена на сервере");
+
+                } else if (input.equals("exit")) {
+                    System.out.println("Завершение работы сервера...");
+                    logger.info("Команда exit выполнена сервером");
+                    commandHandler.saveCollection();
+                    running = false; // цикл завершится при следующей итерации
+                } else if (!input.isEmpty()) {
+                    System.out.println("Неизвестная команда. Доступны: save, exit");
+                }
+            }
+        } catch (IOException e) {
+            logger.error("Ошибка чтения консоли: {}", e.getMessage());
         }
     }
 
@@ -203,7 +223,7 @@ public class Server {
             oos.flush();
 
             byte[] data = baos.toByteArray();
-            // 👇 СОЗДАЕМ БУФЕР С ДЛИНОЙ (4 байта) + ДАННЫЕ
+            // создаем буффер длиной 4 байта и отправляем
             ByteBuffer buffer = ByteBuffer.allocate(4 + data.length);
             buffer.putInt(data.length);  // сначала записываем длину
             buffer.put(data);            // и затем данные
